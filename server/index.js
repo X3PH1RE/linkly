@@ -1,92 +1,53 @@
 import express from 'express';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
 import cors from 'cors';
-import dotenv from 'dotenv';
-import { AccessToken } from 'livekit-server-sdk';
-
-dotenv.config();
 
 const app = express();
+const server = createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "http://localhost:5174",
+    methods: ["GET", "POST"]
+  }
+});
+
 const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// LiveKit configuration
-const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'devkey';
-const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'secret';
-const LIVEKIT_URL = process.env.LIVEKIT_URL || 'ws://localhost:7880';
+// Store active rooms and participants
+const rooms = new Map();
 
-// Store active rooms (in production, use a database)
-const activeRooms = new Map();
-
-// Generate access token for a participant
-function generateAccessToken(roomName, participantName) {
-  const token = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
-    identity: participantName,
-    name: participantName,
-  });
-
-  token.addGrant({
-    roomJoin: true,
-    room: roomName,
-    canPublish: true,
-    canSubscribe: true,
-    canPublishData: true,
-  });
-
-  return token.toJwt();
+// Helper function to get room info
+function getRoomInfo(roomName) {
+  if (!rooms.has(roomName)) {
+    rooms.set(roomName, {
+      name: roomName,
+      participants: new Map(),
+      createdAt: new Date()
+    });
+  }
+  return rooms.get(roomName);
 }
 
-// Routes
+// REST API Routes
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', livekit_url: LIVEKIT_URL });
-});
-
-// Create or join a room
-app.post('/api/rooms/join', (req, res) => {
-  try {
-    const { roomName, participantName } = req.body;
-
-    if (!roomName || !participantName) {
-      return res.status(400).json({ 
-        error: 'Room name and participant name are required' 
-      });
-    }
-
-    // Generate access token
-    const token = generateAccessToken(roomName, participantName);
-
-    // Track the room
-    if (!activeRooms.has(roomName)) {
-      activeRooms.set(roomName, {
-        name: roomName,
-        participants: new Set(),
-        createdAt: new Date(),
-      });
-    }
-
-    const room = activeRooms.get(roomName);
-    room.participants.add(participantName);
-
-    res.json({
-      token,
-      url: LIVEKIT_URL,
-      roomName,
-      participantName,
-    });
-  } catch (error) {
-    console.error('Error joining room:', error);
-    res.status(500).json({ error: 'Failed to join room' });
-  }
+  res.json({ 
+    status: 'OK', 
+    type: 'Socket.IO WebRTC',
+    activeRooms: rooms.size 
+  });
 });
 
 // Get room info
 app.get('/api/rooms/:roomName', (req, res) => {
   const { roomName } = req.params;
-  const room = activeRooms.get(roomName);
+  const room = rooms.get(roomName);
 
   if (!room) {
     return res.status(404).json({ error: 'Room not found' });
@@ -95,48 +56,143 @@ app.get('/api/rooms/:roomName', (req, res) => {
   res.json({
     name: room.name,
     participantCount: room.participants.size,
-    participants: Array.from(room.participants),
+    participants: Array.from(room.participants.keys()),
     createdAt: room.createdAt,
   });
 });
 
 // List all active rooms
 app.get('/api/rooms', (req, res) => {
-  const rooms = Array.from(activeRooms.values()).map(room => ({
+  const roomList = Array.from(rooms.values()).map(room => ({
     name: room.name,
     participantCount: room.participants.size,
     createdAt: room.createdAt,
   }));
 
-  res.json(rooms);
+  res.json(roomList);
 });
 
-// Remove participant from room
-app.post('/api/rooms/:roomName/leave', (req, res) => {
-  const { roomName } = req.params;
-  const { participantName } = req.body;
+// Socket.IO WebRTC Signaling
+io.on('connection', (socket) => {
+  console.log('👤 User connected:', socket.id);
 
-  const room = activeRooms.get(roomName);
-  if (room) {
-    room.participants.delete(participantName);
+  // Join a room
+  socket.on('join-room', (data) => {
+    const { roomName, participantName } = data;
+    console.log(`🚪 ${participantName} joining room: ${roomName}`);
+
+    // Get or create room
+    const room = getRoomInfo(roomName);
     
-    // Clean up empty rooms
-    if (room.participants.size === 0) {
-      activeRooms.delete(roomName);
+    // Add participant to room
+    room.participants.set(socket.id, {
+      id: socket.id,
+      name: participantName,
+      joinedAt: new Date()
+    });
+
+    // Join socket room
+    socket.join(roomName);
+    socket.roomName = roomName;
+    socket.participantName = participantName;
+
+    // Notify existing participants about new user
+    socket.to(roomName).emit('user-joined', {
+      id: socket.id,
+      name: participantName
+    });
+
+    // Send current participants list to new user
+    const participants = Array.from(room.participants.values())
+      .filter(p => p.id !== socket.id);
+
+    socket.emit('room-joined', {
+      roomName,
+      participants,
+      yourId: socket.id
+    });
+
+    console.log(`✅ ${participantName} joined room ${roomName}. Total participants: ${room.participants.size}`);
+  });
+
+  // Handle WebRTC signaling
+  socket.on('webrtc-offer', (data) => {
+    console.log(`📤 Forwarding offer from ${socket.id} to ${data.target}`);
+    socket.to(data.target).emit('webrtc-offer', {
+      offer: data.offer,
+      sender: socket.id
+    });
+  });
+
+  socket.on('webrtc-answer', (data) => {
+    console.log(`📤 Forwarding answer from ${socket.id} to ${data.target}`);
+    socket.to(data.target).emit('webrtc-answer', {
+      answer: data.answer,
+      sender: socket.id
+    });
+  });
+
+  socket.on('webrtc-ice-candidate', (data) => {
+    console.log(`🧊 Forwarding ICE candidate from ${socket.id} to ${data.target}`);
+    socket.to(data.target).emit('webrtc-ice-candidate', {
+      candidate: data.candidate,
+      sender: socket.id
+    });
+  });
+
+  // Handle disconnect
+  socket.on('disconnect', () => {
+    console.log('👋 User disconnected:', socket.id);
+    
+    if (socket.roomName) {
+      const room = rooms.get(socket.roomName);
+      if (room) {
+        // Remove participant from room
+        room.participants.delete(socket.id);
+        
+        // Notify other participants
+        socket.to(socket.roomName).emit('user-left', {
+          id: socket.id,
+          name: socket.participantName
+        });
+
+        console.log(`👋 ${socket.participantName} left room ${socket.roomName}`);
+
+        // Clean up empty rooms
+        if (room.participants.size === 0) {
+          rooms.delete(socket.roomName);
+          console.log(`🧹 Cleaned up empty room: ${socket.roomName}`);
+        }
+      }
     }
-  }
+  });
 
-  res.json({ success: true });
+  // Explicit leave room
+  socket.on('leave-room', () => {
+    if (socket.roomName) {
+      const room = rooms.get(socket.roomName);
+      if (room) {
+        room.participants.delete(socket.id);
+        socket.to(socket.roomName).emit('user-left', {
+          id: socket.id,
+          name: socket.participantName
+        });
+        socket.leave(socket.roomName);
+        console.log(`🚪 ${socket.participantName} explicitly left room ${socket.roomName}`);
+      }
+    }
+  });
 });
 
-// Error handling middleware
-app.use((error, req, res, next) => {
+// Error handling
+server.on('error', (error) => {
   console.error('Server error:', error);
-  res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`LiveKit URL: ${LIVEKIT_URL}`);
-  console.log('Make sure LiveKit server is running for full functionality');
+// Start server
+server.listen(PORT, () => {
+  console.log(`🚀 SmartMeet Server running on port ${PORT}`);
+  console.log(`📡 Socket.IO WebRTC signaling server ready`);
+  console.log(`🌐 Frontend should connect to: http://localhost:${PORT}`);
+  console.log(`💡 This version uses P2P WebRTC - no external servers needed!`);
 }); 

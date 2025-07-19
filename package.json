@@ -13,11 +13,10 @@
   "dependencies": {
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "livekit-client": "^2.15.3",
-    "livekit-server-sdk": "^2.9.1",
+    "socket.io-client": "^4.8.1",
     "express": "^4.21.1",
+    "socket.io": "^4.8.1",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
     "react-router-dom": "^6.28.0",
     "@heroicons/react": "^2.2.0",
     "clsx": "^2.1.1",
