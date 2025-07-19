@@ -65,14 +65,28 @@ const VideoRoom: React.FC = () => {
         // Get user media first
         console.log('🎥 Requesting camera and microphone access...');
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
+          video: { width: 1280, height: 720 },
           audio: true,
         });
 
+        console.log('✅ Media stream obtained:', stream);
+        console.log('📹 Video tracks:', stream.getVideoTracks().length);
+        console.log('🎤 Audio tracks:', stream.getAudioTracks().length);
+
         localStreamRef.current = stream;
+        
+        // Set local video immediately
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
+          console.log('📺 Local video element updated with stream');
+          
+          // Make sure video plays
+          localVideoRef.current.onloadedmetadata = () => {
+            console.log('📺 Local video metadata loaded, attempting play...');
+            localVideoRef.current?.play().catch(e => console.error('Error playing local video:', e));
+          };
         }
+
         console.log('✅ Camera and microphone access granted');
 
         // Connect to Socket.IO
@@ -99,6 +113,7 @@ const VideoRoom: React.FC = () => {
 
           // Create peer connections for existing participants
           data.participants.forEach((participant: Participant) => {
+            console.log('🔗 Creating peer connection for existing participant:', participant.name);
             createPeerConnection(participant.id, true);
           });
         });
@@ -106,6 +121,7 @@ const VideoRoom: React.FC = () => {
         newSocket.on('user-joined', (data) => {
           console.log('👤 New user joined:', data);
           setParticipants(prev => [...prev, data]);
+          console.log('🔗 Creating peer connection for new participant:', data.name);
           createPeerConnection(data.id, false);
         });
 
@@ -117,6 +133,7 @@ const VideoRoom: React.FC = () => {
           if (peerConnectionsRef.current[data.id]) {
             peerConnectionsRef.current[data.id].pc.close();
             delete peerConnectionsRef.current[data.id];
+            console.log('🧹 Cleaned up peer connection for:', data.name);
           }
         });
 
@@ -169,7 +186,10 @@ const VideoRoom: React.FC = () => {
         socket.disconnect();
       }
       if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => track.stop());
+        localStreamRef.current.getTracks().forEach(track => {
+          track.stop();
+          console.log('🛑 Stopped track:', track.kind);
+        });
       }
       Object.values(peerConnectionsRef.current).forEach(({ pc }) => pc.close());
     };
@@ -183,25 +203,41 @@ const VideoRoom: React.FC = () => {
     // Add local stream to peer connection
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
+        console.log('➕ Adding track to peer connection:', track.kind);
         pc.addTrack(track, localStreamRef.current!);
       });
+    } else {
+      console.warn('⚠️ No local stream available when creating peer connection');
     }
 
     // Handle remote stream
     pc.ontrack = (event) => {
-      console.log('📹 Received remote track from:', peerId);
+      console.log('📹 Received remote track from:', peerId, event.track.kind);
       const remoteStream = event.streams[0];
       
-      // Update the peer connection with remote stream
-      peerConnectionsRef.current[peerId] = {
-        ...peerConnectionsRef.current[peerId],
-        remoteStream,
-      };
+      if (remoteStream) {
+        console.log('📺 Setting up remote stream for peer:', peerId);
+        
+        // Update the peer connection with remote stream
+        peerConnectionsRef.current[peerId] = {
+          ...peerConnectionsRef.current[peerId],
+          remoteStream,
+        };
 
-      // Find and update the video element
-      const videoElement = document.getElementById(`video-${peerId}`) as HTMLVideoElement;
-      if (videoElement && remoteStream) {
-        videoElement.srcObject = remoteStream;
+        // Find and update the video element
+        setTimeout(() => {
+          const videoElement = document.getElementById(`video-${peerId}`) as HTMLVideoElement;
+          if (videoElement) {
+            videoElement.srcObject = remoteStream;
+            console.log('📺 Remote video element updated for:', peerId);
+            
+            videoElement.onloadedmetadata = () => {
+              videoElement.play().catch(e => console.error('Error playing remote video:', e));
+            };
+          } else {
+            console.warn('⚠️ Could not find video element for peer:', peerId);
+          }
+        }, 100);
       }
     };
 
@@ -216,11 +252,20 @@ const VideoRoom: React.FC = () => {
       }
     };
 
+    // Monitor connection state
+    pc.onconnectionstatechange = () => {
+      console.log(`🔗 Connection state with ${peerId}:`, pc.connectionState);
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log(`🧊 ICE connection state with ${peerId}:`, pc.iceConnectionState);
+    };
+
     peerConnectionsRef.current[peerId] = { pc, remoteStream: null };
 
     // If we're the initiator, create and send offer
     if (isInitiator) {
-      createOffer(peerId);
+      setTimeout(() => createOffer(peerId), 100);
     }
   };
 
@@ -237,8 +282,9 @@ const VideoRoom: React.FC = () => {
         target: peerId,
         offer: offer,
       });
+      console.log('📤 Offer sent to:', peerId);
     } catch (error) {
-      console.error('Error creating offer:', error);
+      console.error('❌ Error creating offer:', error);
     }
   };
 
@@ -257,8 +303,9 @@ const VideoRoom: React.FC = () => {
         target: senderId,
         answer: answer,
       });
+      console.log('📤 Answer sent to:', senderId);
     } catch (error) {
-      console.error('Error handling offer:', error);
+      console.error('❌ Error handling offer:', error);
     }
   };
 
@@ -269,8 +316,9 @@ const VideoRoom: React.FC = () => {
     try {
       console.log('📥 Handling answer from:', senderId);
       await peerConnection.pc.setRemoteDescription(answer);
+      console.log('✅ Answer processed from:', senderId);
     } catch (error) {
-      console.error('Error handling answer:', error);
+      console.error('❌ Error handling answer:', error);
     }
   };
 
@@ -280,8 +328,9 @@ const VideoRoom: React.FC = () => {
 
     try {
       await peerConnection.pc.addIceCandidate(candidate);
+      console.log('🧊 ICE candidate added from:', senderId);
     } catch (error) {
-      console.error('Error handling ICE candidate:', error);
+      console.error('❌ Error handling ICE candidate:', error);
     }
   };
 
@@ -291,6 +340,7 @@ const VideoRoom: React.FC = () => {
       if (audioTrack) {
         audioTrack.enabled = !audioTrack.enabled;
         setIsMicEnabled(audioTrack.enabled);
+        console.log('🎤 Microphone:', audioTrack.enabled ? 'enabled' : 'disabled');
       }
     }
   };
@@ -301,28 +351,41 @@ const VideoRoom: React.FC = () => {
       if (videoTrack) {
         videoTrack.enabled = !videoTrack.enabled;
         setIsCameraEnabled(videoTrack.enabled);
+        console.log('📹 Camera:', videoTrack.enabled ? 'enabled' : 'disabled');
       }
     }
   };
 
   const toggleScreenShare = async () => {
-    // Basic screen share implementation
     if (!isScreenShareEnabled) {
       try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-        // Replace video track in all peer connections
+        console.log('🖥️ Starting screen share...');
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ 
+          video: true,
+          audio: true 
+        });
+        
         const videoTrack = screenStream.getVideoTracks()[0];
         
+        // Replace video track in all peer connections
         Object.values(peerConnectionsRef.current).forEach(({ pc }) => {
           const sender = pc.getSenders().find(s => s.track?.kind === 'video');
           if (sender) {
             sender.replaceTrack(videoTrack);
+            console.log('🔄 Replaced video track for screen share');
           }
         });
 
+        // Also update local video
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = screenStream;
+        }
+
         setIsScreenShareEnabled(true);
+        console.log('✅ Screen share started');
         
         videoTrack.onended = () => {
+          console.log('🛑 Screen share ended');
           setIsScreenShareEnabled(false);
           // Switch back to camera
           if (localStreamRef.current) {
@@ -333,10 +396,33 @@ const VideoRoom: React.FC = () => {
                 sender.replaceTrack(cameraTrack);
               }
             });
+            
+            // Update local video back to camera
+            if (localVideoRef.current) {
+              localVideoRef.current.srcObject = localStreamRef.current;
+            }
           }
         };
       } catch (error) {
-        console.error('Error starting screen share:', error);
+        console.error('❌ Error starting screen share:', error);
+      }
+    } else {
+      // Stop screen share manually
+      if (localStreamRef.current) {
+        const cameraTrack = localStreamRef.current.getVideoTracks()[0];
+        Object.values(peerConnectionsRef.current).forEach(({ pc }) => {
+          const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+          if (sender) {
+            sender.replaceTrack(cameraTrack);
+          }
+        });
+        
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = localStreamRef.current;
+        }
+        
+        setIsScreenShareEnabled(false);
+        console.log('🛑 Screen share stopped manually');
       }
     }
   };
@@ -431,6 +517,11 @@ const VideoRoom: React.FC = () => {
             <div className="participant-info">
               {participantName} (You)
             </div>
+            {!isCameraEnabled && (
+              <div className="absolute inset-0 bg-gray-800 flex items-center justify-center rounded-lg">
+                <VideoCameraSlashIcon className="h-12 w-12 text-gray-400" />
+              </div>
+            )}
           </div>
 
           {/* Remote participants */}
