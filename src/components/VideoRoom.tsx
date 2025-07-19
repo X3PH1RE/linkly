@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
-import { ArrowLeftIcon } from '@heroicons/react/24/solid';
+import { ArrowLeftIcon, InformationCircleIcon, ClipboardIcon } from '@heroicons/react/24/solid';
 import {
   MicrophoneIcon,
   VideoCameraIcon,
@@ -11,6 +11,7 @@ import {
 import {
   MicrophoneIcon as MicrophoneOffIcon,
   VideoCameraSlashIcon,
+  ClipboardDocumentCheckIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 
@@ -35,6 +36,8 @@ const VideoRoom: React.FC = () => {
   const [isMicEnabled, setIsMicEnabled] = useState(true);
   const [isCameraEnabled, setIsCameraEnabled] = useState(true);
   const [isScreenShareEnabled, setIsScreenShareEnabled] = useState(false);
+  const [showMeetingInfo, setShowMeetingInfo] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -49,11 +52,32 @@ const VideoRoom: React.FC = () => {
     ],
   };
 
+  // Generate meeting link and code
+  const meetingLink = `${window.location.origin}/room/${roomName}`;
+
+  const copyMeetingLink = async () => {
+    try {
+      await navigator.clipboard.writeText(meetingLink);
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy link:', err);
+    }
+  };
+
+  const copyRoomCode = async () => {
+    try {
+      await navigator.clipboard.writeText(roomName || '');
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy room code:', err);
+    }
+  };
+
   useEffect(() => {
     const initializeRoom = async () => {
       console.log('🚀 Starting room initialization...');
-      console.log('Room name:', roomName);
-      console.log('Participant name:', participantName);
 
       if (!roomName) {
         setError('Room name is required');
@@ -69,20 +93,12 @@ const VideoRoom: React.FC = () => {
           audio: true,
         });
 
-        console.log('✅ Media stream obtained:', stream);
-        console.log('📹 Video tracks:', stream.getVideoTracks().length);
-        console.log('🎤 Audio tracks:', stream.getAudioTracks().length);
-
         localStreamRef.current = stream;
         
         // Set local video immediately
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
-          console.log('📺 Local video element updated with stream');
-          
-          // Make sure video plays
           localVideoRef.current.onloadedmetadata = () => {
-            console.log('📺 Local video metadata loaded, attempting play...');
             localVideoRef.current?.play().catch(e => console.error('Error playing local video:', e));
           };
         }
@@ -90,30 +106,21 @@ const VideoRoom: React.FC = () => {
         console.log('✅ Camera and microphone access granted');
 
         // Connect to Socket.IO
-        console.log('📡 Connecting to Socket.IO server...');
         const newSocket = io('http://localhost:3001', {
           transports: ['websocket', 'polling']
         });
 
         newSocket.on('connect', () => {
-          console.log('✅ Connected to server with ID:', newSocket.id);
-          
-          // Join the room
-          console.log('🚪 Joining room...');
-          newSocket.emit('join-room', {
-            roomName,
-            participantName,
-          });
+          console.log('✅ Connected to server');
+          newSocket.emit('join-room', { roomName, participantName });
         });
 
         newSocket.on('room-joined', (data) => {
-          console.log('✅ Successfully joined room:', data);
+          console.log('✅ Successfully joined room');
           setParticipants(data.participants);
           setIsLoading(false);
 
-          // Create peer connections for existing participants
           data.participants.forEach((participant: Participant) => {
-            console.log('🔗 Creating peer connection for existing participant:', participant.name);
             createPeerConnection(participant.id, true);
           });
         });
@@ -121,7 +128,6 @@ const VideoRoom: React.FC = () => {
         newSocket.on('user-joined', (data) => {
           console.log('👤 New user joined:', data);
           setParticipants(prev => [...prev, data]);
-          console.log('🔗 Creating peer connection for new participant:', data.name);
           createPeerConnection(data.id, false);
         });
 
@@ -129,37 +135,28 @@ const VideoRoom: React.FC = () => {
           console.log('👋 User left:', data);
           setParticipants(prev => prev.filter(p => p.id !== data.id));
           
-          // Clean up peer connection
           if (peerConnectionsRef.current[data.id]) {
             peerConnectionsRef.current[data.id].pc.close();
             delete peerConnectionsRef.current[data.id];
-            console.log('🧹 Cleaned up peer connection for:', data.name);
           }
         });
 
         // WebRTC signaling events
         newSocket.on('webrtc-offer', async (data) => {
-          console.log('📥 Received offer from:', data.sender);
           await handleOffer(data.offer, data.sender);
         });
 
         newSocket.on('webrtc-answer', async (data) => {
-          console.log('📥 Received answer from:', data.sender);
           await handleAnswer(data.answer, data.sender);
         });
 
         newSocket.on('webrtc-ice-candidate', async (data) => {
-          console.log('🧊 Received ICE candidate from:', data.sender);
           await handleIceCandidate(data.candidate, data.sender);
         });
 
         newSocket.on('connect_error', (error) => {
           console.error('❌ Socket connection error:', error);
-          if (error.message.includes('CORS')) {
-            setError('CORS error: Frontend and backend port mismatch. Check server configuration.');
-          } else {
-            setError('Failed to connect to server. Make sure the backend is running on port 3001.');
-          }
+          setError('Failed to connect to server. Make sure the backend is running.');
           setIsLoading(false);
         });
 
@@ -167,11 +164,7 @@ const VideoRoom: React.FC = () => {
 
       } catch (err) {
         console.error('❌ Error initializing room:', err);
-        if (err instanceof Error && err.name === 'NotAllowedError') {
-          setError('Camera and microphone access denied. Please allow permissions and try again.');
-        } else {
-          setError('Failed to initialize video chat. Please check your camera and microphone.');
-        }
+        setError('Failed to initialize video chat. Please check your camera and microphone.');
         setIsLoading(false);
       }
     };
@@ -186,65 +179,43 @@ const VideoRoom: React.FC = () => {
         socket.disconnect();
       }
       if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => {
-          track.stop();
-          console.log('🛑 Stopped track:', track.kind);
-        });
+        localStreamRef.current.getTracks().forEach(track => track.stop());
       }
       Object.values(peerConnectionsRef.current).forEach(({ pc }) => pc.close());
     };
   }, [roomName, participantName]);
 
   const createPeerConnection = (peerId: string, isInitiator: boolean) => {
-    console.log(`🔗 Creating peer connection with ${peerId}, initiator: ${isInitiator}`);
-    
     const pc = new RTCPeerConnection(pcConfig);
     
-    // Add local stream to peer connection
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
-        console.log('➕ Adding track to peer connection:', track.kind);
         pc.addTrack(track, localStreamRef.current!);
       });
-    } else {
-      console.warn('⚠️ No local stream available when creating peer connection');
     }
 
-    // Handle remote stream
     pc.ontrack = (event) => {
-      console.log('📹 Received remote track from:', peerId, event.track.kind);
       const remoteStream = event.streams[0];
-      
       if (remoteStream) {
-        console.log('📺 Setting up remote stream for peer:', peerId);
-        
-        // Update the peer connection with remote stream
         peerConnectionsRef.current[peerId] = {
           ...peerConnectionsRef.current[peerId],
           remoteStream,
         };
 
-        // Find and update the video element
         setTimeout(() => {
           const videoElement = document.getElementById(`video-${peerId}`) as HTMLVideoElement;
           if (videoElement) {
             videoElement.srcObject = remoteStream;
-            console.log('📺 Remote video element updated for:', peerId);
-            
             videoElement.onloadedmetadata = () => {
               videoElement.play().catch(e => console.error('Error playing remote video:', e));
             };
-          } else {
-            console.warn('⚠️ Could not find video element for peer:', peerId);
           }
         }, 100);
       }
     };
 
-    // Handle ICE candidates
     pc.onicecandidate = (event) => {
       if (event.candidate && socket) {
-        console.log('🧊 Sending ICE candidate to:', peerId);
         socket.emit('webrtc-ice-candidate', {
           target: peerId,
           candidate: event.candidate,
@@ -252,18 +223,8 @@ const VideoRoom: React.FC = () => {
       }
     };
 
-    // Monitor connection state
-    pc.onconnectionstatechange = () => {
-      console.log(`🔗 Connection state with ${peerId}:`, pc.connectionState);
-    };
-
-    pc.oniceconnectionstatechange = () => {
-      console.log(`🧊 ICE connection state with ${peerId}:`, pc.iceConnectionState);
-    };
-
     peerConnectionsRef.current[peerId] = { pc, remoteStream: null };
 
-    // If we're the initiator, create and send offer
     if (isInitiator) {
       setTimeout(() => createOffer(peerId), 100);
     }
@@ -274,7 +235,6 @@ const VideoRoom: React.FC = () => {
     if (!peerConnection || !socket) return;
 
     try {
-      console.log('📤 Creating offer for:', peerId);
       const offer = await peerConnection.pc.createOffer();
       await peerConnection.pc.setLocalDescription(offer);
       
@@ -282,7 +242,6 @@ const VideoRoom: React.FC = () => {
         target: peerId,
         offer: offer,
       });
-      console.log('📤 Offer sent to:', peerId);
     } catch (error) {
       console.error('❌ Error creating offer:', error);
     }
@@ -293,9 +252,7 @@ const VideoRoom: React.FC = () => {
     if (!peerConnection || !socket) return;
 
     try {
-      console.log('📥 Handling offer from:', senderId);
       await peerConnection.pc.setRemoteDescription(offer);
-      
       const answer = await peerConnection.pc.createAnswer();
       await peerConnection.pc.setLocalDescription(answer);
       
@@ -303,7 +260,6 @@ const VideoRoom: React.FC = () => {
         target: senderId,
         answer: answer,
       });
-      console.log('📤 Answer sent to:', senderId);
     } catch (error) {
       console.error('❌ Error handling offer:', error);
     }
@@ -314,9 +270,7 @@ const VideoRoom: React.FC = () => {
     if (!peerConnection) return;
 
     try {
-      console.log('📥 Handling answer from:', senderId);
       await peerConnection.pc.setRemoteDescription(answer);
-      console.log('✅ Answer processed from:', senderId);
     } catch (error) {
       console.error('❌ Error handling answer:', error);
     }
@@ -328,7 +282,6 @@ const VideoRoom: React.FC = () => {
 
     try {
       await peerConnection.pc.addIceCandidate(candidate);
-      console.log('🧊 ICE candidate added from:', senderId);
     } catch (error) {
       console.error('❌ Error handling ICE candidate:', error);
     }
@@ -340,7 +293,6 @@ const VideoRoom: React.FC = () => {
       if (audioTrack) {
         audioTrack.enabled = !audioTrack.enabled;
         setIsMicEnabled(audioTrack.enabled);
-        console.log('🎤 Microphone:', audioTrack.enabled ? 'enabled' : 'disabled');
       }
     }
   };
@@ -351,7 +303,6 @@ const VideoRoom: React.FC = () => {
       if (videoTrack) {
         videoTrack.enabled = !videoTrack.enabled;
         setIsCameraEnabled(videoTrack.enabled);
-        console.log('📹 Camera:', videoTrack.enabled ? 'enabled' : 'disabled');
       }
     }
   };
@@ -359,35 +310,24 @@ const VideoRoom: React.FC = () => {
   const toggleScreenShare = async () => {
     if (!isScreenShareEnabled) {
       try {
-        console.log('🖥️ Starting screen share...');
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ 
-          video: true,
-          audio: true 
-        });
-        
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
         const videoTrack = screenStream.getVideoTracks()[0];
         
-        // Replace video track in all peer connections
         Object.values(peerConnectionsRef.current).forEach(({ pc }) => {
           const sender = pc.getSenders().find(s => s.track?.kind === 'video');
           if (sender) {
             sender.replaceTrack(videoTrack);
-            console.log('🔄 Replaced video track for screen share');
           }
         });
 
-        // Also update local video
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = screenStream;
         }
 
         setIsScreenShareEnabled(true);
-        console.log('✅ Screen share started');
         
         videoTrack.onended = () => {
-          console.log('🛑 Screen share ended');
           setIsScreenShareEnabled(false);
-          // Switch back to camera
           if (localStreamRef.current) {
             const cameraTrack = localStreamRef.current.getVideoTracks()[0];
             Object.values(peerConnectionsRef.current).forEach(({ pc }) => {
@@ -396,8 +336,6 @@ const VideoRoom: React.FC = () => {
                 sender.replaceTrack(cameraTrack);
               }
             });
-            
-            // Update local video back to camera
             if (localVideoRef.current) {
               localVideoRef.current.srcObject = localStreamRef.current;
             }
@@ -406,29 +344,10 @@ const VideoRoom: React.FC = () => {
       } catch (error) {
         console.error('❌ Error starting screen share:', error);
       }
-    } else {
-      // Stop screen share manually
-      if (localStreamRef.current) {
-        const cameraTrack = localStreamRef.current.getVideoTracks()[0];
-        Object.values(peerConnectionsRef.current).forEach(({ pc }) => {
-          const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-          if (sender) {
-            sender.replaceTrack(cameraTrack);
-          }
-        });
-        
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = localStreamRef.current;
-        }
-        
-        setIsScreenShareEnabled(false);
-        console.log('🛑 Screen share stopped manually');
-      }
     }
   };
 
   const handleLeaveRoom = () => {
-    console.log('🚪 Leaving room...');
     if (socket) {
       socket.emit('leave-room');
       socket.disconnect();
@@ -442,7 +361,6 @@ const VideoRoom: React.FC = () => {
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
           <p className="text-white text-lg">Joining room...</p>
-          <p className="text-gray-400 text-sm mt-2">Setting up camera and microphone</p>
         </div>
       </div>
     );
@@ -454,14 +372,6 @@ const VideoRoom: React.FC = () => {
         <div className="bg-video-dark rounded-lg p-8 max-w-md w-full mx-4">
           <h2 className="text-xl font-bold text-red-400 mb-4">Connection Error</h2>
           <p className="text-gray-300 mb-6">{error}</p>
-          
-          <div className="bg-gray-800 p-3 rounded mb-4 text-xs">
-            <p className="text-gray-400 mb-1">Debug Info:</p>
-            <p className="text-gray-300">Room: {roomName}</p>
-            <p className="text-gray-300">Participant: {participantName}</p>
-            <p className="text-gray-300">Type: Socket.IO + WebRTC P2P</p>
-          </div>
-          
           <div className="space-y-3">
             <button
               onClick={() => window.location.reload()}
@@ -497,10 +407,88 @@ const VideoRoom: React.FC = () => {
             <p className="text-sm text-gray-400">Participant: {participantName}</p>
           </div>
         </div>
-        <div className="text-sm text-gray-400">
-          {participants.length + 1} participant{participants.length !== 0 ? 's' : ''}
+        
+        <div className="flex items-center space-x-3">
+          {/* Meeting Info Button */}
+          <button
+            onClick={() => setShowMeetingInfo(!showMeetingInfo)}
+            className="p-2 rounded-lg hover:bg-gray-700 transition-colors"
+            title="Meeting details & invite"
+          >
+            <InformationCircleIcon className="h-5 w-5 text-white" />
+          </button>
+          
+          <div className="text-sm text-gray-400">
+            {participants.length + 1} participant{participants.length !== 0 ? 's' : ''}
+          </div>
         </div>
       </div>
+
+      {/* Meeting Info Panel */}
+      {showMeetingInfo && (
+        <div className="bg-video-dark border-b border-gray-700 p-4">
+          <div className="max-w-2xl">
+            <h3 className="text-lg font-semibold text-white mb-4">📋 Meeting Details & Invite</h3>
+            
+            <div className="grid md:grid-cols-2 gap-4">
+              {/* Meeting Code */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Meeting Code</label>
+                <div className="flex items-center space-x-2">
+                  <code className="bg-gray-800 px-3 py-2 rounded text-white font-mono text-sm flex-1 border border-gray-600">
+                    {roomName}
+                  </code>
+                  <button
+                    onClick={copyRoomCode}
+                    className="p-2 bg-blue-600 hover:bg-blue-700 rounded transition-colors"
+                    title="Copy meeting code"
+                  >
+                    {linkCopied ? (
+                      <ClipboardDocumentCheckIcon className="h-4 w-4 text-white" />
+                    ) : (
+                      <ClipboardIcon className="h-4 w-4 text-white" />
+                    )}
+                  </button>
+                </div>
+              </div>
+              
+              {/* Meeting Link */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-2">Meeting Link</label>
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="text"
+                    value={meetingLink}
+                    readOnly
+                    className="bg-gray-800 px-3 py-2 rounded text-white text-sm flex-1 border border-gray-600"
+                  />
+                  <button
+                    onClick={copyMeetingLink}
+                    className="p-2 bg-green-600 hover:bg-green-700 rounded transition-colors"
+                    title="Copy meeting link"
+                  >
+                    {linkCopied ? (
+                      <ClipboardDocumentCheckIcon className="h-4 w-4 text-white" />
+                    ) : (
+                      <ClipboardIcon className="h-4 w-4 text-white" />
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+            
+            {linkCopied && (
+              <p className="text-green-400 text-sm mt-2">✅ Copied to clipboard!</p>
+            )}
+            
+            <div className="mt-4 p-3 bg-blue-900 bg-opacity-30 rounded-lg border border-blue-600">
+              <p className="text-blue-200 text-sm">
+                <strong>💡 Share with others:</strong> Send the meeting code or link to invite participants to join this meeting.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Video Grid */}
       <div className="flex-1 p-4">
@@ -515,7 +503,7 @@ const VideoRoom: React.FC = () => {
               className="w-full h-full object-cover rounded-lg"
             />
             <div className="participant-info">
-              {participantName} (You)
+              {participantName} (You) {isScreenShareEnabled && '🖥️'}
             </div>
             {!isCameraEnabled && (
               <div className="absolute inset-0 bg-gray-800 flex items-center justify-center rounded-lg">
