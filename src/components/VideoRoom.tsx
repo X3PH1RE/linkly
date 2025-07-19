@@ -44,6 +44,33 @@ const VideoRoom: React.FC = () => {
   const peerConnectionsRef = useRef<{ [key: string]: PeerConnection }>({});
   const participantName = searchParams.get('participant') || 'Anonymous';
 
+  // Debug function to check video state
+  const debugVideoState = () => {
+    console.log('=== VIDEO DEBUG INFO ===');
+    console.log('Local stream ref:', localStreamRef.current);
+    console.log('Local video element:', localVideoRef.current);
+    console.log('Camera enabled:', isCameraEnabled);
+    if (localStreamRef.current) {
+      console.log('Video tracks:', localStreamRef.current.getVideoTracks());
+      console.log('Audio tracks:', localStreamRef.current.getAudioTracks());
+    }
+    if (localVideoRef.current) {
+      console.log('Video element srcObject:', localVideoRef.current.srcObject);
+      console.log('Video element paused:', localVideoRef.current.paused);
+      console.log('Video element readyState:', localVideoRef.current.readyState);
+    }
+    console.log('=== END DEBUG INFO ===');
+  };
+
+  // Effect to ensure video element gets stream (in case it's created after stream)
+  useEffect(() => {
+    if (localStreamRef.current && localVideoRef.current && !localVideoRef.current.srcObject) {
+      console.log('🔄 Setting video stream in secondary effect...');
+      localVideoRef.current.srcObject = localStreamRef.current;
+      localVideoRef.current.play().catch(e => console.warn('Secondary video play failed:', e));
+    }
+  }, [localStreamRef.current, localVideoRef.current]);
+
   // WebRTC configuration
   const pcConfig = {
     iceServers: [
@@ -76,7 +103,17 @@ const VideoRoom: React.FC = () => {
   };
 
   useEffect(() => {
+    let isConnecting = false;
+    let currentSocket: Socket | null = null;
+    
     const initializeRoom = async () => {
+      // Prevent duplicate initialization
+      if (isConnecting) {
+        console.log('⚠️ Already connecting, skipping duplicate initialization');
+        return;
+      }
+      
+      isConnecting = true;
       console.log('🚀 Starting room initialization...');
 
       if (!roomName) {
@@ -93,14 +130,44 @@ const VideoRoom: React.FC = () => {
           audio: true,
         });
 
+        console.log('✅ Media stream obtained:', stream);
         localStreamRef.current = stream;
         
-        // Set local video immediately
+        // Set local video immediately with better error handling
         if (localVideoRef.current) {
+          console.log('📺 Setting local video stream...');
           localVideoRef.current.srcObject = stream;
+          localVideoRef.current.muted = true; // Always mute own audio to prevent feedback
+          localVideoRef.current.autoplay = true;
+          localVideoRef.current.playsInline = true;
+          
           localVideoRef.current.onloadedmetadata = () => {
-            localVideoRef.current?.play().catch(e => console.error('Error playing local video:', e));
+            console.log('📺 Local video metadata loaded, starting playback...');
+            if (localVideoRef.current) {
+              localVideoRef.current.play()
+                .then(() => {
+                  console.log('✅ Local video playing successfully');
+                })
+                .catch(e => {
+                  console.error('❌ Error playing local video:', e);
+                  // Try to play again after a short delay
+                  setTimeout(() => {
+                    if (localVideoRef.current) {
+                      localVideoRef.current.play().catch(err => 
+                        console.error('❌ Second attempt to play local video failed:', err)
+                      );
+                    }
+                  }, 1000);
+                });
+            }
           };
+          
+          // Force immediate play attempt
+          localVideoRef.current.play().catch(e => {
+            console.log('⏳ Initial play failed, waiting for metadata...', e.message);
+          });
+        } else {
+          console.error('❌ Local video element not found!');
         }
 
         console.log('✅ Camera and microphone access granted');
@@ -110,13 +177,15 @@ const VideoRoom: React.FC = () => {
           transports: ['websocket', 'polling']
         });
 
+        currentSocket = newSocket;
+
         newSocket.on('connect', () => {
-          console.log('✅ Connected to server');
+          console.log('✅ Connected to server with ID:', newSocket.id);
           newSocket.emit('join-room', { roomName, participantName });
         });
 
         newSocket.on('room-joined', (data) => {
-          console.log('✅ Successfully joined room');
+          console.log('✅ Successfully joined room, participants:', data.participants.length);
           setParticipants(data.participants);
           setIsLoading(false);
 
@@ -127,7 +196,14 @@ const VideoRoom: React.FC = () => {
 
         newSocket.on('user-joined', (data) => {
           console.log('👤 New user joined:', data);
-          setParticipants(prev => [...prev, data]);
+          setParticipants(prev => {
+            const exists = prev.some(p => p.id === data.id);
+            if (exists) {
+              console.warn('⚠️ Participant already exists, not adding duplicate');
+              return prev;
+            }
+            return [...prev, data];
+          });
           createPeerConnection(data.id, false);
         });
 
@@ -164,24 +240,35 @@ const VideoRoom: React.FC = () => {
 
       } catch (err) {
         console.error('❌ Error initializing room:', err);
-        setError('Failed to initialize video chat. Please check your camera and microphone.');
+        if (err instanceof Error && err.name === 'NotAllowedError') {
+          setError('Camera and microphone access denied. Please allow permissions and try again.');
+        } else {
+          setError('Failed to initialize video chat. Please check your camera and microphone.');
+        }
         setIsLoading(false);
       }
     };
 
     initializeRoom();
 
-    // Cleanup
+    // Cleanup function
     return () => {
       console.log('🧹 Cleaning up room...');
-      if (socket) {
-        socket.emit('leave-room');
-        socket.disconnect();
+      isConnecting = false;
+      
+      if (currentSocket) {
+        currentSocket.emit('leave-room');
+        currentSocket.removeAllListeners();
+        currentSocket.disconnect();
+        console.log('✅ Socket cleaned up properly');
       }
+      
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
+      
       Object.values(peerConnectionsRef.current).forEach(({ pc }) => pc.close());
+      peerConnectionsRef.current = {};
     };
   }, [roomName, participantName]);
 
@@ -298,12 +385,34 @@ const VideoRoom: React.FC = () => {
   };
 
   const toggleCamera = () => {
-    if (localStreamRef.current) {
-      const videoTrack = localStreamRef.current.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        setIsCameraEnabled(videoTrack.enabled);
+    if (!localStreamRef.current) return;
+
+    const videoTrack = localStreamRef.current.getVideoTracks()[0];
+    if (videoTrack) {
+      const newEnabled = !isCameraEnabled;
+      videoTrack.enabled = newEnabled;
+      setIsCameraEnabled(newEnabled);
+      
+      // Update all peer connections
+      Object.values(peerConnectionsRef.current).forEach(({ pc }) => {
+        const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+        if (sender && sender.track) {
+          sender.track.enabled = newEnabled;
+        }
+      });
+      
+      // Ensure local video element shows the change immediately
+      if (localVideoRef.current) {
+        if (newEnabled) {
+          // Camera is now ON - make sure video is playing
+          localVideoRef.current.play().catch(e => {
+            console.warn('Could not restart local video:', e);
+          });
+        }
+        console.log('📹 Local video visibility updated:', newEnabled ? 'visible' : 'hidden');
       }
+      
+      console.log('📹 Camera:', newEnabled ? 'enabled' : 'disabled');
     }
   };
 
@@ -583,6 +692,16 @@ const VideoRoom: React.FC = () => {
             title="Leave call"
           >
             <PhoneIcon className="h-6 w-6 text-white transform rotate-135" />
+          </button>
+
+          {/* Debug Button - Temporary */}
+          <button
+            onClick={debugVideoState}
+            className="control-button"
+            title="Debug video state"
+            style={{ backgroundColor: '#8B5CF6' }}
+          >
+            🐛
           </button>
         </div>
       </div>
